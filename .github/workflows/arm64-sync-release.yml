@@ -1,0 +1,179 @@
+name: Sync Upstream & Release Windows ARM64
+
+on:
+  schedule:
+    # Weekly on Monday 04:00 CST (Sunday 20:00 UTC)
+    - cron: '0 20 * * 0'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force rebuild and update release even if upstream has no new commits'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: arm64-sync-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      needs_build: ${{ steps.check.outputs.needs_build }}
+      upstream_sha: ${{ steps.check.outputs.upstream_sha }}
+      short_sha: ${{ steps.check.outputs.short_sha }}
+      build_ref: ${{ steps.check.outputs.build_ref }}
+
+    steps:
+      - name: Checkout win-arm64
+        uses: actions/checkout@v4
+        with:
+          ref: win-arm64
+          fetch-depth: 0
+
+      - name: Sync upstream yr and merge into win-arm64
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_BUILD: ${{ inputs.force_build || false }}
+        run: |
+          set -euo pipefail
+
+          git remote add upstream https://github.com/Yuri0314/SmartAlert.git
+          git fetch upstream yr
+
+          UPSTREAM_SHA=$(git rev-parse upstream/yr)
+          SHORT_SHA=$(git rev-parse --short=7 upstream/yr)
+          TAG="arm64-${SHORT_SHA}"
+
+          echo "Upstream yr HEAD: ${UPSTREAM_SHA} (${SHORT_SHA})"
+
+          # Fast-forward mirror branch yr
+          ORIGIN_YR_SHA=$(git ls-remote origin refs/heads/yr | awk '{print $1}')
+          if [ "${ORIGIN_YR_SHA}" != "${UPSTREAM_SHA}" ]; then
+            echo "Syncing origin/yr to ${UPSTREAM_SHA}..."
+            git push origin "upstream/yr:refs/heads/yr"
+          fi
+
+          # Merge upstream/yr into win-arm64 if not already merged
+          MERGED=false
+          if ! git merge-base --is-ancestor "${UPSTREAM_SHA}" HEAD; then
+            echo "Merging upstream/yr into win-arm64..."
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git merge --no-edit upstream/yr
+            git push origin HEAD:refs/heads/win-arm64
+            MERGED=true
+          fi
+
+          RELEASE_EXISTS=false
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            RELEASE_EXISTS=true
+          fi
+
+          NEEDS_BUILD=false
+          if [ "${MERGED}" = "true" ] || [ "${RELEASE_EXISTS}" = "false" ] || [ "${FORCE_BUILD}" = "true" ]; then
+            NEEDS_BUILD=true
+          fi
+
+          BUILD_REF=$(git rev-parse HEAD)
+          echo "needs_build=${NEEDS_BUILD}" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_ref=${BUILD_REF}" >> "$GITHUB_OUTPUT"
+          echo "Result: merged=${MERGED}, release_exists=${RELEASE_EXISTS}, force=${FORCE_BUILD}, needs_build=${NEEDS_BUILD}"
+
+  build-and-release:
+    needs: sync
+    if: needs.sync.outputs.needs_build == 'true'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout win-arm64
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.build_ref }}
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      - name: Build Windows ARM64
+        shell: pwsh
+        run: ./build.ps1 -Runtime win-arm64
+
+      - name: Verify ARM64 output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $outDir = Join-Path $PWD "Build-win-arm64"
+          $exe = Join-Path $outDir "WorldAlteringEditor.exe"
+          if (-not (Test-Path $exe)) { throw "Missing WorldAlteringEditor.exe" }
+
+          # Check PE Machine header (0xAA64 = ARM64)
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0xAA64) {
+            throw ("Expected ARM64 PE machine (0xAA64), got 0x{0:X4}" -f $machine)
+          }
+
+          # Ensure no legacy .NET Core 2.1 runtime pollution
+          if (Test-Path (Join-Path $outDir "hostfxr.dll")) {
+            throw "Unexpected hostfxr.dll found in output directory"
+          }
+
+          # Ensure required Mental Omega configs and translations exist
+          $requiredFiles = @(
+            "Config/MentalOmega/Constants.ini",
+            "Config/MentalOmega/FileManagerConfig.ini",
+            "Config/Translations/zh-Hans/ObjectNames_zh-Hans.ini"
+          )
+          foreach ($rel in $requiredFiles) {
+            $full = Join-Path $outDir $rel
+            if (-not (Test-Path $full)) { throw "Missing required asset: $rel" }
+          }
+          Write-Host "ARM64 output verification passed."
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          7z a -tzip -r SmartAlert-win-arm64.zip "$env:GITHUB_WORKSPACE\Build-win-arm64\*"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+          SHORT_SHA: ${{ needs.sync.outputs.short_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "arm64-$env:SHORT_SHA"
+          $title = "SmartAlert Windows ARM64 ($env:SHORT_SHA)"
+          $notes = @(
+            "Windows ARM64 native build based on [Yuri0314/SmartAlert@$env:SHORT_SHA](https://github.com/Yuri0314/SmartAlert/commit/$env:UPSTREAM_SHA)."
+            ""
+            "### Runtime Requirement"
+            "- Windows 11 ARM64"
+            "- [.NET 8.0 Desktop Runtime (ARM64)](https://dotnet.microsoft.com/download/dotnet/8.0)"
+          ) -join "`n"
+
+          gh release view $tag *> $null
+          $exists = ($LASTEXITCODE -eq 0)
+
+          if ($exists) {
+            gh release upload $tag SmartAlert-win-arm64.zip --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            gh release edit $tag --title $title --notes $notes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            gh release create $tag SmartAlert-win-arm64.zip --target win-arm64 --title $title --notes $notes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

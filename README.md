@@ -1,8 +1,14 @@
-# SmartAlert
+# SmartAlert (Windows ARM64)
 
-一个 AI 驱动的红色警戒系列地图编辑器，基于 [WorldAlteringEditor](https://github.com/CnCNet/WorldAlteringEditor) fork 开发。
+基于 [Yuri0314/SmartAlert](https://github.com/Yuri0314/SmartAlert) 构建的 Windows ARM64 原生版本（上游基于 [WorldAlteringEditor](https://github.com/CnCNet/WorldAlteringEditor) 开发）。
 
-An AI-powered map editor for the Red Alert series, forked from [WorldAlteringEditor](https://github.com/CnCNet/WorldAlteringEditor).
+Windows ARM64 native build based on [Yuri0314/SmartAlert](https://github.com/Yuri0314/SmartAlert) (forked from [WorldAlteringEditor](https://github.com/CnCNet/WorldAlteringEditor)).
+
+## ⚙️ Windows ARM64 运行与构建
+
+- **运行环境**：Windows 11 ARM64，需安装 [.NET 8.0 Desktop Runtime (ARM64)](https://dotnet.microsoft.com/download/dotnet/8.0)
+- **直接运行**：从本仓库 Releases 下载 `SmartAlert-win-arm64.zip`，解压后运行 `WorldAlteringEditor.exe`
+- **本地构建**：运行 `./build.ps1 -Runtime win-arm64`（输出至 `Build-win-arm64/`）
 
 ## 🎯 核心特性 / Core Features
 
